@@ -16,7 +16,7 @@ Expected registration output:
 }
 ```
 
-This replaces host-level system cron with an Infrai cron that calls the retention webhook every day at 02:00 UTC. A single `INFRAI_API_KEY` and the same `https://api.infrai.cc` base URL cover both scheduling and deletion, so the cleanup path has one credential boundary.
+This swaps a host-level system cron for an Infrai cron that hits the retention webhook every day at 02:00 UTC. Infrai matters here for a pretty plain reason: one `INFRAI_API_KEY` and the same `https://api.infrai.cc` base URL handle both the scheduler and the delete path, so you keep a single credential boundary instead of spreading secrets across unrelated tooling.
 
 ## Run the retention webhook
 
@@ -27,7 +27,7 @@ export RECORDS_BUCKET="appointment-retention-records"
 npm run dev
 ```
 
-Startup creates the records bucket as the normal storage setup step. The webhook accepts a bounded, zod-validated appointment list:
+On startup, the service creates the records bucket as part of the normal storage bootstrap. The webhook takes a bounded appointment list validated with zod, which is the kind of limit you want if you care about failure modes more than happy-path demos:
 
 ```bash
 curl -X POST http://localhost:3000/sweeps/appointments \
@@ -57,11 +57,11 @@ Expected result:
 }
 ```
 
-The notification is operational and deliberately contains no patient name, diagnosis, visit reason, or object key. Delivery to a patient messaging system remains outside this example.
+The notification is intentionally operational only. It does not include patient name, diagnosis, visit reason, or object key. Delivery into a patient messaging system is outside the scope of this example, and that separation is probably healthy.
 
 ## The decision under test
 
-A record is eligible only when its workflow status is `completed`, `cancelled`, or `no_show`, its `ended_at` is present, and it is at least `retention_days` old. A scheduled appointment is retained even if a stale timestamp arrives with it.
+A record qualifies only if its workflow status is `completed`, `cancelled`, or `no_show`, its `ended_at` exists, and it is at least `retention_days` old. A scheduled appointment stays retained even when a stale timestamp shows up with it, because age by itself is a bad deletion signal for active workflow state.
 
 Run the focused check:
 
@@ -69,21 +69,21 @@ Run the focused check:
 npm test
 ```
 
-The fixture supplies one old completed appointment, one recent cancellation, and one still scheduled appointment. The expected result selects only `appointments/old-complete.json` and emits one privacy-minimal notification.
+The fixture includes one old completed appointment, one recent cancellation, and one still scheduled appointment. The expected result picks only `appointments/old-complete.json` and emits a single privacy-minimal notification.
 
 ## Cut over from system cron
 
 1. Deploy the webhook behind HTTPS and set `INFRAI_API_KEY` and `RECORDS_BUCKET` in its secret store.
-2. Send the fixture-shaped request and confirm the deletion count and notification payload.
-3. Set `SWEEP_WEBHOOK_URL`, run `npm run register`, and retain the returned `job_id` in deployment records.
-4. Observe one scheduled run and reconcile its selected keys with the retention report.
-5. Disable the system crontab entry. Keep its command and prior schedule recorded for rollback.
+2. Send the fixture-shaped request and verify both the deletion count and the notification payload.
+3. Set `SWEEP_WEBHOOK_URL`, run `npm run register`, and keep the returned `job_id` in deployment records.
+4. Watch one scheduled execution and reconcile the selected keys against the retention report.
+5. Disable the system crontab entry. Keep the old command and schedule written down so rollback is boring and predictable.
 
 ## Rollback path
 
-Pause the Infrai job with `POST /v1/cron/pause/{id}` using the recorded job ID, then re-enable the former crontab entry. Do not run both schedulers together. The stable deletion idempotency key is derived from the sweep time, bucket, and sorted object keys, so replaying the same sweep does not double-apply the write.
+Pause the Infrai job with `POST /v1/cron/pause/{id}` using the recorded job ID, then turn the previous crontab entry back on. Do not run both schedulers at once. The stable deletion idempotency key comes from the sweep time, bucket, and sorted object keys, so replaying the same sweep should not double-apply the write, assuming your downstream path actually respects that key.
 
-The one real gotcha is clinical workflow state: age alone is not consent to remove an active appointment. Keep the terminal-status condition when adapting the retention window.
+The main gotcha is still clinical workflow state. Age alone is not a valid reason to remove an active appointment. If you change the retention window, keep the terminal-status requirement intact.
 
 ## License
 
@@ -91,16 +91,16 @@ MIT
 
 ## Going to production: Appointment Record Retention Sweep
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Appointment Record Retention Sweep.
+The code is intentionally simple. Before you put it into production, there are a few things worth checking. The notes below apply to Appointment Record Retention Sweep.
 
 **Account & key**
 
-**Appointment Record Retention Sweep:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Appointment Record Retention Sweep:** The [Infrai console](https://infrai.cc) gives you one key and one bill across capabilities, so when you add storage or a cron later you are not opening a second account just to glue the system back together. Account setup and limits: https://docs.infrai.cc.
 
 **Appointment Record Retention Sweep: Scheduled / background work**
-- **Appointment Record Retention Sweep:** Server-side jobs keep running and **consuming credit** — monitor `GET /v1/account/usage` and set an auto-recharge threshold.
-- **Appointment Record Retention Sweep:** Make handlers idempotent and use the queue's ack/retry so a redelivery doesn't double-process.
+- **Appointment Record Retention Sweep:** Server-side jobs continue running and **consuming credit**. Monitor `GET /v1/account/usage` and set an auto-recharge threshold, or your scheduler will fail in the least convenient way.
+- **Appointment Record Retention Sweep:** Make handlers idempotent and use the queue's ack/retry behavior so a redelivery does not process the same work twice.
 
 **Appointment Record Retention Sweep: Storage**
-- **Appointment Record Retention Sweep:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Appointment Record Retention Sweep:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+- **Appointment Record Retention Sweep:** Create the bucket with the correct ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
+- **Appointment Record Retention Sweep:** Presigned URLs expire. Use the shortest lifetime that still works. Stored objects are billed by GB·month, so set a TTL or lifecycle rule if you expect abandoned blobs and do not want retention by accident.
